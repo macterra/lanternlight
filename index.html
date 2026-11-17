@@ -94,7 +94,7 @@ body.playing #title{opacity:0;pointer-events:none}
 
 <div id="title">
   <h1>Lanternlight</h1>
-  <p>Nothing out here exists until your light finds it. Almost nothing.</p>
+  <p>The dark out here is not empty.</p>
   <div class="go" id="go">Click to begin</div>
 </div>
 <div id="err"></div>
@@ -169,19 +169,19 @@ const wetness = (x, z) => Math.max(pathiness(x, z) * smooth(0.4, 0.7, vnoise(x *
 
 /* ------------------------------------------------------------------- save */
 const SAVE_KEY = 'lanternlight-v1';
-const save = { wisps: new Set(), shrines: new Set(), found: new Set(), dist: 0, seen: 0, pos: [0, 0] };
+const save = { wisps: new Set(), shrines: new Set(), found: new Set(), dist: 0, seen: 0, taken: 0, glimpsed: 0, pos: [0, 0] };
 try {
   const raw = localStorage.getItem(SAVE_KEY);
   if (raw) {
     const d = JSON.parse(raw);
     save.wisps = new Set(d.w || []); save.shrines = new Set(d.s || []); save.found = new Set(d.f || []);
-    save.dist = +d.d || 0; save.seen = +d.n || 0; if (Array.isArray(d.p)) save.pos = [+d.p[0] || 0, +d.p[1] || 0];
+    save.dist = +d.d || 0; save.seen = +d.n || 0; save.taken = +d.k || 0; save.glimpsed = +d.g || 0; if (Array.isArray(d.p)) save.pos = [+d.p[0] || 0, +d.p[1] || 0];
   }
 } catch (e) { /* storage unavailable: play without saving */ }
 let persist = function () {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify({
-      w: [...save.wisps], s: [...save.shrines], f: [...save.found], d: Math.round(save.dist), n: save.seen, p: [ppos.x, ppos.z],
+      w: [...save.wisps], s: [...save.shrines], f: [...save.found], d: Math.round(save.dist), n: save.seen, k: save.taken, g: save.glimpsed, p: [ppos.x, ppos.z],
     }));
   } catch (e) { /* ignore */ }
 };
@@ -197,12 +197,12 @@ renderer.toneMappingExposure = 1.0;
 document.body.prepend(renderer.domElement);
 const canvas = renderer.domElement;
 
-const NIGHT = 0x04060a;
+const NIGHT = 0x121923;           // the mist is a shade lighter than the things standing in it, so they read as silhouettes
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(NIGHT);
-scene.fog = new THREE.FogExp2(NIGHT, 0.045);
+scene.fog = new THREE.FogExp2(NIGHT, 0.05);
 
-const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 500);
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 500);
 
 // final grade: desaturate, cold shadows, chromatic fringe, vignette, film grain
 const GradeShader = {
@@ -216,11 +216,11 @@ const GradeShader = {
       vec2 off = d * r2 * 0.014;
       vec3 c = vec3(texture2D(tDiffuse, vUv + off).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv - off).b);
       float l = dot(c, vec3(0.299, 0.587, 0.114));
-      c = mix(vec3(l), c, 0.74 - dim * 0.3);
-      c = mix(c * vec3(0.82, 0.96, 1.12), c, smoothstep(0.0, 0.3, l));
-      c *= 1.0 - smoothstep(0.08, 0.62, r2) * (0.72 + dim * 0.2);
+      c = mix(vec3(l), c, 0.6 - dim * 0.25);
+      c = mix(c * vec3(0.78, 0.95, 1.14), c, smoothstep(0.0, 0.3, l));
+      c *= 1.0 - smoothstep(0.06, 0.6, r2) * (0.8 + dim * 0.15);
       float g = h(vUv * vec2(1731.0, 977.0) + fract(time * 7.13) * 91.0) - 0.5;
-      c += g * (0.05 + 0.03 * (1.0 - l));
+      c += g * (0.065 + 0.04 * (1.0 - l));
       gl_FragColor = vec4(max(c, 0.0), 1.0);
     }`,
 };
@@ -232,17 +232,22 @@ composer.addPass(new OutputPass());
 const grade = new ShaderPass(GradeShader);
 composer.addPass(grade);
 
+let maxPR = 1.5;
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  const pr = Math.min(devicePixelRatio, maxPR); renderer.setPixelRatio(pr); composer.setPixelRatio(pr);
   renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight);
 });
 
-/* ------------------------------------------------------------ sky + moon */
-scene.add(new THREE.HemisphereLight(0x25324c, 0x08090c, 0.75));
+/* ----------------------------------------------------------- sky + storm */
+const HEMI = 0.5;
+const hemi = new THREE.HemisphereLight(0x25324c, 0x08090c, HEMI); scene.add(hemi);
 const moonDir = new V3(-0.5, 0.5, -0.6).normalize();
-const moonLight = new THREE.DirectionalLight(0x6f84ad, 0.42);
+const moonLight = new THREE.DirectionalLight(0x6f84ad, 0.16);
 moonLight.position.copy(moonDir);
 scene.add(moonLight);
+const flashLight = new THREE.DirectionalLight(0xc4d2ff, 0); scene.add(flashLight);   // lightning
+const fogDark = new THREE.Color(NIGHT), fogFlash = new THREE.Color(0x5b6880);
 
 function makeGlowTex() {
   const c = document.createElement('canvas'); c.width = c.height = 64;
@@ -259,22 +264,10 @@ const glowSprite = (hex, mult = 1, fog = false) => new THREE.SpriteMaterial({
   depthWrite: false, transparent: true, fog,
 });
 
+// overcast: no stars, and the moon is only a pale smear behind the cloud
 const sky = new THREE.Group(); scene.add(sky);
 {
-  const N = 900, p = new Float32Array(N * 3), c = new Float32Array(N * 3), r = mulberry32(42);
-  for (let i = 0; i < N; i++) {
-    const a = r() * Math.PI * 2, y = Math.pow(r(), 0.7) * 0.95 + 0.03, h = Math.sqrt(1 - y * y);
-    p[i * 3] = Math.cos(a) * h * 300; p[i * 3 + 1] = y * 300; p[i * 3 + 2] = Math.sin(a) * h * 300;
-    const b = 0.15 + r() * 0.6;
-    c[i * 3] = b * 0.9; c[i * 3 + 1] = b * 0.94; c[i * 3 + 2] = b;
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(p, 3)); g.setAttribute('color', new THREE.BufferAttribute(c, 3));
-  const stars = new THREE.Points(g, new THREE.PointsMaterial({ size: 1.5, sizeAttenuation: false, vertexColors: true, fog: false, transparent: true, depthWrite: false }));
-  stars.frustumCulled = false; sky.add(stars);
-  const moon = new THREE.Sprite(glowSprite(0x9fb4e0, 1.1)); moon.scale.setScalar(60); moon.position.copy(moonDir).multiplyScalar(280); sky.add(moon);
-  const disc = new THREE.Mesh(new THREE.CircleGeometry(6, 24), new THREE.MeshBasicMaterial({ color: new THREE.Color(0xd6deee).multiplyScalar(1.1), fog: false }));
-  disc.position.copy(moonDir).multiplyScalar(279); disc.lookAt(0, 0, 0); sky.add(disc);
+  const moon = new THREE.Sprite(glowSprite(0x8fa4cc, 0.13)); moon.scale.setScalar(170); moon.position.copy(moonDir).multiplyScalar(280); sky.add(moon);
 }
 
 /* ---------------------------------------------------- procedural textures */
@@ -394,7 +387,7 @@ const fernTex = (() => {       // a fern frond: stem along x, leaflets shrinking
 })();
 
 /* --------------------------------------------------------------- materials */
-const SM = o => new THREE.MeshStandardMaterial({ roughness: 0.92, metalness: 0, ...o });
+const SM = o => new THREE.MeshStandardMaterial({ roughness: 0.74, metalness: 0, ...o });   // everything is wet
 const glowM = (hex, k) => new THREE.MeshStandardMaterial({ color: 0x000000, emissive: hex, emissiveIntensity: k, roughness: 1 });
 const windU = { value: 0 };
 const mats = {
@@ -412,13 +405,16 @@ const mats = {
   stone: SM({ map: rockTex, bumpMap: rockTex, bumpScale: 3, color: 0x8a8882, side: THREE.DoubleSide }),
   iron: SM({ color: 0x1c1c1f, metalness: 0.75, roughness: 0.5 }),
   ironDS: SM({ color: 0x1c1c1f, metalness: 0.75, roughness: 0.5, side: THREE.DoubleSide }),
-  cloth: SM({ map: rockTex, color: 0x4a423c, roughness: 1 }),
-  sack: SM({ map: rockTex, color: 0xa3906a, roughness: 1 }),
+  cloth: SM({ map: rockTex, color: 0x332e2b, roughness: 0.9 }),
+  sack: SM({ map: rockTex, color: 0x7d6e52, roughness: 1 }),
   straw: SM({ color: 0x8a7a44, roughness: 1 }),
   rope: SM({ color: 0x7c6c4c, roughness: 1 }),
   candle: SM({ color: 0xd8d0b8, roughness: 0.6 }),
   black: SM({ color: 0x020202, roughness: 1 }),
-  figure: SM({ color: 0x1a1a1f, roughness: 1 }),
+  figure: SM({ map: rockTex, color: 0x34343a, roughness: 0.9 }),
+  face: SM({ color: 0xbcb8ac, roughness: 0.85 }),
+  bone: SM({ map: rockTex, color: 0xc9c0a6, roughness: 0.7 }),
+  leather: SM({ map: rockTex, color: 0x4a3828, roughness: 0.8 }),
   tarn: SM({ color: 0x010204, roughness: 0.05 }),
   bronze: SM({ map: rockTex, color: 0x5a6650, metalness: 0.6, roughness: 0.55, side: THREE.DoubleSide }),
   flame: glowM(0xff9338, 4.2), flameDim: glowM(0xff8030, 1.6), coal: glowM(0xff3a10, 0.7),
@@ -434,8 +430,8 @@ mats.ground.onBeforeCompile = sh => {
   sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nattribute float aWet;\nvarying float vWet;')
     .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWet = aWet;');
   sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vWet;')
-    .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= mix(1.0, 0.5, vWet);')
-    .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 0.2, vWet);');
+    .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= mix(0.8, 0.4, vWet);')
+    .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(0.6, 0.1, vWet);');
 };
 // grass leans and shivers in the wind
 mats.tuft.onBeforeCompile = sh => {
@@ -449,6 +445,19 @@ mats.tuft.onBeforeCompile = sh => {
   transformed.z += sw * 0.15 * transformed.y * transformed.y;
 #endif`);
 };
+
+// foliage dissolves as it reaches the lens, so walking through boughs does not fill the screen with one huge card
+function nearFade(mat, a, b) {
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (sh, r) => {
+    prev.call(mat, sh, r);
+    sh.fragmentShader = sh.fragmentShader.replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+{ float nd = length(vViewPosition); if (nd < ${b} && fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) > smoothstep(${a}, ${b}, nd)) discard; }`);
+  };
+  mat.customProgramCacheKey = () => 'nearFade' + a + b + prev.toString();
+}
+nearFade(mats.needles, '0.9', '2.3'); nearFade(mats.fern, '0.6', '1.5'); nearFade(mats.fernDead, '0.6', '1.5'); nearFade(mats.tuft, '0.5', '1.3');
+for (const m of [mats.bark, mats.barkDark, mats.barkPale]) nearFade(m, '0.45', '1.2');      // and a trunk right against the lens thins out too
 
 /* ---------------------------------------------------------------- geometry */
 const v2 = p => new THREE.Vector2(p[0], p[1]);
@@ -466,8 +475,16 @@ const G = {
   ring: new THREE.TorusGeometry(0.05, 0.008, 4, 10),
   bell: new THREE.LatheGeometry([[0, 1.6], [0.25, 1.58], [0.45, 1.45], [0.56, 1.2], [0.62, 0.8], [0.72, 0.4], [0.92, 0.1], [0.97, 0]].map(v2), 18).translate(0, -0.8, 0),
   bowl: new THREE.LatheGeometry([[0.0, 0], [0.16, 0.02], [0.29, 0.12], [0.35, 0.27]].map(v2), 14),
-  cloak: new THREE.LatheGeometry([[0.37, 0], [0.34, 0.2], [0.26, 0.7], [0.19, 1.1], [0.23, 1.3], [0.14, 1.42], [0.0, 1.47]].map(v2), 16),
-  thin: new THREE.LatheGeometry([[0.13, 0], [0.2, 0.5], [0.16, 1.25], [0.23, 1.95], [0.1, 2.1], [0.0, 2.16]].map(v2), 12),
+  cloak: (() => {      // a heavy cloak, with folds that deepen toward the hem
+    const g = new THREE.LatheGeometry([[0.4, 0], [0.37, 0.22], [0.3, 0.75], [0.27, 1.15], [0.3, 1.34], [0.2, 1.45], [0.08, 1.5], [0.0, 1.51]].map(v2), 32), p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), y = p.getY(i), z = p.getZ(i), k = 1 + 0.1 * Math.sin(Math.atan2(z, x) * 8 + y * 2.2) * smooth(1.25, 0.1, y);
+      p.setXYZ(i, x * k, y, z * k);
+    }
+    g.computeVertexNormals(); return g;
+  })(),
+  thin: new THREE.LatheGeometry([[0.15, 0], [0.19, 0.5], [0.15, 1.2], [0.17, 1.7], [0.27, 1.98], [0.2, 2.08], [0.07, 2.16], [0.0, 2.18]].map(v2), 14),
+  rib: new THREE.TorusGeometry(0.2, 0.011, 4, 8, Math.PI),
 };
 function mk(geo, mat, x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1, rx = 0, ry = 0, rz = 0) {
   const m = new THREE.Mesh(geo, mat);
@@ -678,6 +695,29 @@ function bPebbles(r) {
   for (let i = 0; i < 3; i++) { const s = 0.06 + r() * 0.1; const p = mk(pick(V.rock, r), mats.rock, (r() - 0.5) * 0.9, s * 0.3, (r() - 0.5) * 0.9, s, s * 0.6, s, 0, r() * 6.28, 0); p.castShadow = false; g.add(p); }
   return { g, cols: [] };
 }
+function bBones(r) {     // what is left of something that lay down here
+  const g = new THREE.Group(); g.position.y = -0.03;
+  for (let i = 0; i < 6; i++) { const s = 0.75 + 0.3 * Math.sin(i * 0.65 + 0.5); g.add(mk(G.rib, mats.bone, (r() - 0.5) * 0.02, 0, (i - 2.5) * 0.115, s, s * (0.9 + r() * 0.2), s, (r() - 0.5) * 0.25, 0, 0)); }
+  g.add(mk(G.cyl, mats.bone, 0, 0.2, -0.36, 0.016, 0.9, 0.016, Math.PI / 2, 0, 0));
+  g.add(mk(V.rock[1], mats.bone, 0.03, 0.06, 0.74, 0.07, 0.065, 0.13, 0.2, 0.3, 0));
+  for (let i = 0; i < 3; i++) g.add(mk(G.cyl, mats.bone, 0.3 + r() * 0.5, 0.02, (r() - 0.5) * 0.8, 0.014, 0.3 + r() * 0.15, 0.014, Math.PI / 2, r() * 6.28, 0));
+  return { g, cols: [] };
+}
+function bEffigy(r) {    // a stick figure lashed to a stake. Somebody made these
+  const g = new THREE.Group(), h = 1.7 + r() * 0.5;
+  g.add(mk(G.box, mats.wood, 0, -0.2, 0, 0.06, h + 0.2, 0.06, (r() - 0.5) * 0.14, 0, (r() - 0.5) * 0.14));
+  const e = new THREE.Group(); e.position.set(0, h - 0.5, 0.05); e.rotation.z = (r() - 0.5) * 0.35; g.add(e);
+  const st = (x, y, len, rz) => e.add(mk(G.boxC, mats.barkDark, x, y, 0, 0.024, len, 0.024, 0, 0, rz));
+  st(0, 0, 0.62, 0); st(0, 0.13, 0.56, Math.PI / 2 + (r() - 0.5) * 0.2);
+  st(-0.09, -0.45, 0.38, -0.5); st(0.09, -0.45, 0.38, 0.5);
+  e.add(mk(G.ring, mats.barkDark, 0, 0.4, 0, 1.7, 1.7, 3));
+  return { g, cols: [[0, 0, 0.1]] };
+}
+function bDeadLantern(r) {   // someone else carried a light out here
+  const g = new THREE.Group(), l = lanternModel(null);
+  l.position.set(0, 0.09, 0); l.rotation.set(1.42, r() * 6.28, 0.25); l.scale.setScalar(1.15); g.add(l);
+  return { g, cols: [] };
+}
 function candle(g, x, y, z) {
   g.add(mk(G.cyl, mats.candle, x, y, z, 0.022, 0.1, 0.022));
   g.add(glow(G.sphere, mats.flame, x, y + 0.135, z, 0.012, 0.03, 0.012));
@@ -835,8 +875,8 @@ const wispHalo = glowSprite(0x86bcd4, 0.6);
 /* ------------------------------------------------------------ grass tufts */
 const tuftGeo = (() => {
   const pos = [], col = [], idx = [], r = mulberry32(7);
-  for (let b = 0; b < 10; b++) {
-    const a = r() * 6.28, lean = 0.15 + r() * 0.5, h = 0.4 + r() * 0.45, w = 0.016 + r() * 0.014, ox = (r() - 0.5) * 0.18, oz = (r() - 0.5) * 0.18;
+  for (let b = 0; b < 16; b++) {      // many thin blades: rank, wet, dying grass
+    const a = r() * 6.28, lean = 0.15 + r() * 0.7, h = 0.2 + r() * 0.5, w = 0.007 + r() * 0.009, ox = (r() - 0.5) * 0.34, oz = (r() - 0.5) * 0.34;
     const dx = Math.cos(a), dz = Math.sin(a), sx = -dz, sz = dx, base = pos.length / 3;
     for (const [t, ww] of [[0, 1], [0.55, 0.72]]) {
       const off = lean * h * t * t, cx = ox + dx * off, cz = oz + dz * off, c = 0.3 + 0.7 * t;
@@ -865,16 +905,16 @@ const blocked = (clear, x, z, pad) => { for (const c of clear) { const dx = x - 
 
 function place(ch, built, x, z, rot, s, extra = {}) {
   const y = height(x, z), g = built.g;
-  g.position.set(x, y, z); g.rotation.y = rot; g.scale.setScalar(0.0001); g.visible = false;
-  ch.group.add(g);
+  g.position.set(x, y, z); g.rotation.y = rot; g.scale.setScalar(s);
   const cs = Math.cos(rot), sn = Math.sin(rot);
   const o = {
-    g, x, y, z, s, t: 0, j: (hash2(Math.round(x * 31), Math.round(z * 31), 3) - 0.5) * 2.6, spd: 0.8 + hash2(Math.round(x * 17), Math.round(z * 17), 4) * 0.7,
+    g, x, y, z, s,
     cols: (built.cols || []).map(([lx, lz, r]) => [x + (lx * cs + lz * sn) * s, z + (-lx * sn + lz * cs) * s, r * s]),
-    kind: 'prop', big: 0, always: false, tall: 0, dk: 0, ...extra,
+    kind: 'prop', tall: 0, ...extra,
   };
-  if (o.always) { o.t = 1; g.scale.setScalar(s); g.visible = true; }
   ch.objs.push(o);
+  if (o.kind !== 'prop') ch.group.add(g);                  // landmarks and beacons stay live; plain scenery is baked (see bakeChunk)
+  if (o.kind === 'curio' || o.crows) ch.active.push(o);    // the few things that react to the light
   return o;
 }
 function addShrine(ch, x, z, id, home) {
@@ -888,9 +928,58 @@ function addShrine(ch, x, z, id, home) {
 }
 function setLit(o) { o.lit = true; o.fire.visible = true; o.flame.visible = true; o.ember.visible = false; }
 
+// Scenery never moves, so each chunk's props are merged into one mesh per material.
+// Drawn one by one, a forest is over a thousand draw calls and the frame rate dies.
+const nrmM = new THREE.Matrix3(), bkP = new V3(), bkQ = new THREE.Quaternion(), bkS = new V3();
+function bakeChunk(ch) {
+  const bins = new Map(), loose = [];
+  for (const o of ch.objs) {
+    if (o.kind !== 'prop') continue;
+    o.g.updateMatrixWorld(true);
+    // shadow casters are baked per quarter-chunk, so only the ones near the lantern need go into the shadow map
+    const q = (o.x - ch.cx * CH >= CH / 2 ? 1 : 0) + (o.z - ch.cz * CH >= CH / 2 ? 2 : 0);
+    o.g.traverse(m => {
+      if (m.isSprite) { loose.push(m); return; }
+      if (!m.isMesh) return;
+      const k = m.material.uuid + (m.castShadow ? 's' + q : 'n'); let b = bins.get(k);
+      if (!b) bins.set(k, b = { mat: m.material, cast: m.castShadow, q, list: [], nv: 0, ni: 0 });
+      b.list.push(m); b.nv += m.geometry.attributes.position.count; b.ni += m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count;
+    });
+    o.g = null;
+  }
+  for (const s of loose) { s.matrixWorld.decompose(bkP, bkQ, bkS); s.removeFromParent(); s.position.copy(bkP); s.scale.copy(bkS); ch.group.add(s); }
+  for (const b of bins.values()) {
+    const pos = new Float32Array(b.nv * 3), nor = new Float32Array(b.nv * 3), uv = new Float32Array(b.nv * 2), col = b.mat.vertexColors ? new Float32Array(b.nv * 3) : null;
+    const idx = b.nv > 65535 ? new Uint32Array(b.ni) : new Uint16Array(b.ni);
+    let vo = 0, io = 0;
+    for (const m of b.list) {
+      const g = m.geometry, pa = g.attributes.position.array, na = g.attributes.normal.array, U = g.attributes.uv, C = g.attributes.color, n = g.attributes.position.count;
+      const e = m.matrixWorld.elements, ne = nrmM.getNormalMatrix(m.matrixWorld).elements;
+      for (let i = 0; i < n; i++) {
+        const s3 = i * 3, d3 = (vo + i) * 3, x = pa[s3], y = pa[s3 + 1], z = pa[s3 + 2], a = na[s3], b2 = na[s3 + 1], c = na[s3 + 2];
+        pos[d3] = e[0] * x + e[4] * y + e[8] * z + e[12]; pos[d3 + 1] = e[1] * x + e[5] * y + e[9] * z + e[13]; pos[d3 + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
+        const nx = ne[0] * a + ne[3] * b2 + ne[6] * c, ny = ne[1] * a + ne[4] * b2 + ne[7] * c, nz = ne[2] * a + ne[5] * b2 + ne[8] * c, l = Math.hypot(nx, ny, nz) || 1;
+        nor[d3] = nx / l; nor[d3 + 1] = ny / l; nor[d3 + 2] = nz / l;
+      }
+      if (U) uv.set(U.array, vo * 2);
+      if (col) { if (C) col.set(C.array, vo * 3); else col.fill(1, vo * 3, (vo + n) * 3); }
+      if (g.index) { const ia = g.index.array; for (let i = 0; i < ia.length; i++) idx[io + i] = ia[i] + vo; io += ia.length; }
+      else { for (let i = 0; i < n; i++) idx[io + i] = vo + i; io += n; }
+      vo += n;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3)); geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    if (col) geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1)); geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, b.mat); mesh.castShadow = false; mesh.receiveShadow = true;
+    if (b.cast) { mesh.userData.cx = (ch.cx + 0.25 + (b.q & 1) * 0.5) * CH; mesh.userData.cz = (ch.cz + 0.25 + (b.q >> 1) * 0.5) * CH; ch.casters.push(mesh); }
+    ch.group.add(mesh); ch.baked.push(geo);
+  }
+}
+
 function genChunk(cx, cz) {
   const key = cx + ',' + cz, ox = cx * CH, oz = cz * CH;
-  const ch = { cx, cz, key, objs: [], wisps: [], shrines: [], group: new THREE.Group() };
+  const ch = { cx, cz, key, objs: [], active: [], wisps: [], shrines: [], baked: [], casters: [], group: new THREE.Group() };
 
   // ground
   const geo = new THREE.PlaneGeometry(CH, CH, 16, 16); geo.rotateX(-Math.PI / 2);
@@ -921,7 +1010,7 @@ function genChunk(cx, cz) {
     const x = ox + CH / 2 + (rng() - 0.5) * 4, z = oz + CH / 2 + (rng() - 0.5) * 4;
     if (!blocked(clear, x, z, 4)) {
       const b = CURIOS[ctype].build(rng);
-      place(ch, b, x, z, rng() * 6.28, 1, { kind: 'curio', ctype, big: 3.5, seen: false, face: ctype === 'scarecrow' });
+      place(ch, b, x, z, rng() * 6.28, 1, { kind: 'curio', ctype, seen: false, face: ctype === 'scarecrow' });
       clear.push({ x, z, r: b.clear });
     }
   }
@@ -954,10 +1043,13 @@ function genChunk(cx, cz) {
     if (q < 0.06) { place(ch, bRock(rng), x, z, rot, 1); continue; } q -= 0.06;
     if (q < 0.05 + f * 0.09) { place(ch, bFern(rng), x, z, rot, 1); continue; } q -= 0.05 + f * 0.09;
     if (q < 0.045) { place(ch, bShrub(rng), x, z, rot, sc); continue; } q -= 0.045;
-    if (q < 0.022) { place(ch, bStump(rng), x, z, rot, 1); if (rng() < 0.4) place(ch, bFoxfire(rng), x, z, rot, 1, { always: true }); continue; } q -= 0.022;
-    if (q < 0.014) { place(ch, bLog(rng), x, z, rot, 1); if (rng() < 0.45) place(ch, bFoxfire(rng), x, z, rot, 1, { always: true }); continue; } q -= 0.014;
+    if (q < 0.022) { place(ch, bStump(rng), x, z, rot, 1); if (rng() < 0.4) place(ch, bFoxfire(rng), x, z, rot, 1); continue; } q -= 0.022;
+    if (q < 0.014) { place(ch, bLog(rng), x, z, rot, 1); if (rng() < 0.45) place(ch, bFoxfire(rng), x, z, rot, 1); continue; } q -= 0.014;
     if (q < 0.007) { place(ch, bWall(rng), x, z, rot, 1); continue; } q -= 0.007;
-    if (q < 0.004) { place(ch, bLoneGrave(rng), x, z, rot, 1); continue; }
+    if (q < 0.004) { place(ch, bLoneGrave(rng), x, z, rot, 1); continue; } q -= 0.004;
+    if (q < 0.002 + f * 0.008) { place(ch, bEffigy(rng), x, z, rot, 1); continue; } q -= 0.002 + f * 0.008;
+    if (q < 0.004) { place(ch, bBones(rng), x, z, rot, 1); continue; } q -= 0.004;
+    if (q < 0.003) { place(ch, bDeadLantern(rng), x, z, rot, 1); continue; }
   }
 
   // drifting lights
@@ -973,34 +1065,39 @@ function genChunk(cx, cz) {
   }
 
   // grass
-  const N = 170, im = new THREE.InstancedMesh(tuftGeo, mats.tuft, N), data = [];
-  tmpM.makeScale(0, 0, 0);
+  const N = 500, im = new THREE.InstancedMesh(tuftGeo, mats.tuft, N); let nT = 0;
   for (let i = 0; i < N; i++) {
-    const x = ox + rng() * CH, z = oz + rng() * CH, s = 0.6 + rng() * 0.7, rot = rng() * 6.28, c = rng();
+    const x = ox + rng() * CH, z = oz + rng() * CH, s = 0.6 + rng() * 0.8, rot = rng() * 6.28, c = rng();
     if (pathiness(x, z) > 0.35 || blocked(clear, x, z, -1.2)) continue;
-    im.setMatrixAt(data.length, tmpM);
-    im.setColorAt(data.length, tmpC.setHSL(0.12 + c * 0.09, 0.3 + c * 0.1, 0.2 + c * 0.14));
-    data.push({ x, z, y: height(x, z), s, rot, t: 0, j: (c - 0.5) * 2.6 });
+    im.setMatrixAt(nT, tmpM.makeRotationY(rot).scale(tmpS.set(s, s * (0.7 + c * 0.6), s)).setPosition(x, height(x, z), z));
+    im.setColorAt(nT, tmpC.setHSL(0.1 + c * 0.1, 0.22 + c * 0.1, 0.1 + c * 0.11));
+    nT++;
   }
-  im.count = data.length; im.frustumCulled = false; im.receiveShadow = true;
+  im.count = nT; im.receiveShadow = true;
   if (im.instanceColor) im.instanceColor.needsUpdate = true;
-  ch.group.add(im); ch.tufts = im; ch.tuftData = data;
+  ch.group.add(im); ch.tufts = im;
 
+  bakeChunk(ch);
   world.add(ch.group);
   return ch;
 }
-function dropChunk(ch) { world.remove(ch.group); ch.ground.geometry.dispose(); ch.tufts.dispose(); }
+function dropChunk(ch) { world.remove(ch.group); ch.ground.geometry.dispose(); ch.tufts.dispose(); for (const g of ch.baked) g.dispose(); }
 let pcx = 1e9, pcz = 1e9;
-function updateChunks() {
+const genQueue = [];
+function updateChunks(all) {
   const cx = Math.floor(ppos.x / CH), cz = Math.floor(ppos.z / CH);
-  if (cx === pcx && cz === pcz) return;
-  pcx = cx; pcz = cz;
-  for (let dx = -LOAD_R; dx <= LOAD_R; dx++) for (let dz = -LOAD_R; dz <= LOAD_R; dz++) {
-    const key = (cx + dx) + ',' + (cz + dz);
-    if (!chunks.has(key)) chunks.set(key, genChunk(cx + dx, cz + dz));
+  if (cx !== pcx || cz !== pcz) {
+    pcx = cx; pcz = cz; genQueue.length = 0;
+    for (let dx = -LOAD_R; dx <= LOAD_R; dx++) for (let dz = -LOAD_R; dz <= LOAD_R; dz++) {
+      if (!chunks.has((cx + dx) + ',' + (cz + dz))) genQueue.push([cx + dx, cz + dz, dx * dx + dz * dz]);
+    }
+    genQueue.sort((a, b) => b[2] - a[2]);      // nearest last, so pop() takes it first
+    for (const [key, ch] of chunks) if (Math.abs(ch.cx - cx) > LOAD_R + 1 || Math.abs(ch.cz - cz) > LOAD_R + 1) { dropChunk(ch); chunks.delete(key); }
   }
-  for (const [key, ch] of chunks) if (Math.abs(ch.cx - cx) > LOAD_R + 1 || Math.abs(ch.cz - cz) > LOAD_R + 1) { dropChunk(ch); chunks.delete(key); }
-  refreshLit();
+  // new ground is built one chunk a frame, out in the mist, so crossing a boundary never stalls
+  let n = all ? 99 : 1, made = false;
+  while (genQueue.length && n-- > 0) { const [x, z] = genQueue.pop(), key = x + ',' + z; if (!chunks.has(key)) { chunks.set(key, genChunk(x, z)); made = true; } }
+  if (made) refreshLit();
 }
 
 /* ----------------------------------------------------------------- walker */
@@ -1008,14 +1105,19 @@ const ppos = new V3(save.pos[0], 0, save.pos[1]);
 const vel = new V3();
 const player = new THREE.Group(); scene.add(player);
 const body = new THREE.Group(); player.add(body);
-body.add(mk(G.cloak, mats.cloth, 0, 0, 0, 0.82, 1, 0.82));
-body.add(mk(G.sphere, mats.cloth, 0, 1.56, 0, 0.17, 0.19, 0.19));
-body.add(mk(G.cone, mats.cloth, 0, 1.55, -0.1, 0.15, 0.3, 0.15, -0.9, 0, 0));
-body.add(mk(G.sphere, mats.black, 0, 1.54, 0.13, 0.115, 0.135, 0.07));
-body.add(mk(G.cyl, mats.cloth, 0.2, 1.28, 0.04, 0.05, 0.62, 0.05, 2.02, 0, -0.16));
+body.add(mk(G.cloak, mats.cloth, 0, 0, 0, 0.8, 1.03, 0.6));                      // broad across the shoulders, seen from behind
+body.add(mk(G.sphere, mats.cloth, 0, 1.6, 0, 0.165, 0.19, 0.185));
+body.add(mk(G.cone, mats.cloth, 0, 1.62, -0.08, 0.13, 0.2, 0.13, -1.1, 0, 0));
+body.add(mk(G.sphere, mats.black, 0, 1.58, 0.13, 0.115, 0.135, 0.07));
+body.add(mk(G.cyl, mats.cloth, 0.2, 1.3, 0.04, 0.05, 0.62, 0.05, 2.02, 0, -0.16));
+body.add(mk(G.boxC, mats.leather, 0.02, 1.02, -0.2, 0.3, 0.36, 0.13, 0.1, 0, 0.04));   // satchel
+body.add(mk(G.cyl, mats.sack, -0.21, 1.27, -0.2, 0.065, 0.42, 0.065, 0, 0, -Math.PI / 2));  // bedroll
+body.add(mk(G.boxC, mats.leather, 0.06, 1.2, 0.0, 0.035, 0.5, 0.42, 0, 0, 0.75));       // strap
+const lanternFlame = glowM(0xff9338, 4.2);
 const lanternPivot = new THREE.Group(); lanternPivot.position.set(0.3, 1.02, 0.58); body.add(lanternPivot);
-const lantern = lanternModel(mats.flame); lantern.position.y = -0.3; lanternPivot.add(lantern);
+const lantern = lanternModel(lanternFlame); lantern.position.y = -0.3; lanternPivot.add(lantern);
 const lanternHalo = new THREE.Sprite(glowSprite(0xff9440, 0.4)); lanternHalo.scale.setScalar(0.7); lantern.add(lanternHalo);
+const lanternHaze = new THREE.Sprite(glowSprite(0xff8a3c, 0.03, true)); lanternHaze.scale.setScalar(4); lantern.add(lanternHaze);   // light scattering in the wet air
 const lanternLight = new THREE.PointLight(0xff8c3a, 30, 14, 1.35);
 lanternLight.castShadow = true; lanternLight.shadow.mapSize.set(1024, 1024); lanternLight.shadow.bias = -0.004; lanternLight.shadow.normalBias = 0.02;
 lanternLight.shadow.camera.near = 0.12; lanternLight.shadow.camera.far = 32;
@@ -1023,7 +1125,7 @@ lanternLight.shadow.autoUpdate = false;        // redrawn from the main loop, so
 let shadowEvery = 1, frameN = 0;
 lantern.add(lanternLight);
 // weak shadowless bounce from above so the ground still reads inside the long shadows
-const fillLight = new THREE.PointLight(0xffa868, 10, 14, 1.2); fillLight.position.set(0, 3.2, 0); player.add(fillLight);
+const fillLight = new THREE.PointLight(0xffa868, 10, 14, 1.2); fillLight.position.set(0.3, 2.4, 1.6); player.add(fillLight);   // ahead of the walker, so their back stays dark
 
 const pool = [];
 for (let i = 0; i < 4; i++) { const L = new THREE.PointLight(0xff9440, 0, 15, 1.5); L.userData.on = false; L.userData.ph = i * 1.7; scene.add(L); pool.push(L); }
@@ -1053,8 +1155,8 @@ function isLit(x, z, j) {
 /* ------------------------------------------------------------------ input */
 const keys = {};
 let started = false, journalOpen = false;
-let camYaw = 0.7, camPitch = 0.8, camDist = 12.5;
-const camTarget = new V3(ppos.x, height(ppos.x, ppos.z) + 1.2, ppos.z);
+let camYaw = 0.7, camPitch = 0.16, camDist = 4.4, camDistNow = 4.4;     // low, close, over the shoulder
+const camTarget = new V3(ppos.x, height(ppos.x, ppos.z) + 1.7, ppos.z);
 let joy = null, drag = null;
 const joyEl = document.getElementById('joy');
 
@@ -1085,7 +1187,7 @@ canvas.addEventListener('pointermove', e => {
     joyEl.firstElementChild.style.transform = `translate(${joy.dx * k}px,${joy.dy * k}px)`;
   } else if (drag && e.pointerId === drag.id) {
     camYaw -= (e.clientX - drag.x) * 0.006;
-    camPitch = clamp(camPitch + (e.clientY - drag.y) * 0.004, 0.3, 1.3);
+    camPitch = clamp(camPitch + (e.clientY - drag.y) * 0.004, -0.14, 1.0);
     drag.x = e.clientX; drag.y = e.clientY;
   }
 });
@@ -1094,7 +1196,7 @@ const endPointer = e => {
   if (drag && e.pointerId === drag.id) drag = null;
 };
 canvas.addEventListener('pointerup', endPointer); canvas.addEventListener('pointercancel', endPointer);
-canvas.addEventListener('wheel', e => { camDist = clamp(camDist + e.deltaY * 0.01, 6, 22); }, { passive: true });
+canvas.addEventListener('wheel', e => { camDist = clamp(camDist + e.deltaY * 0.006, 2.6, 11); }, { passive: true });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 /* ------------------------------------------------------------------ audio */
@@ -1103,7 +1205,8 @@ const audio = {
   init() {
     const C = window.AudioContext || window.webkitAudioContext; if (!C || this.ctx) return;
     const ctx = this.ctx = new C();
-    this.master = ctx.createGain(); this.master.gain.value = this.muted ? 0 : 0.75; this.master.connect(ctx.destination);
+    this.master = ctx.createGain(); this.master.gain.value = this.muted ? 0 : 0.75;
+    const comp = ctx.createDynamicsCompressor(); this.master.connect(comp); comp.connect(ctx.destination);   // thunder must not clip
     this.delay = ctx.createDelay(1); this.delay.delayTime.value = 0.37;
     const fb = ctx.createGain(); fb.gain.value = 0.42; this.delay.connect(fb); fb.connect(this.delay);
     const wet = ctx.createGain(); wet.gain.value = 0.5; this.delay.connect(wet); wet.connect(this.master);
@@ -1123,6 +1226,14 @@ const audio = {
     wl.connect(wlg); wlg.connect(wg.gain); const wfl = ctx.createGain(); wfl.gain.value = 160; wl.connect(wfl); wfl.connect(wf.frequency);
     src.connect(wf); wf.connect(wg); wg.connect(this.master);
     src.start(); lfo.start(); wl.start();
+    // rain: a bright hiss, and a duller patter under it
+    const rs = ctx.createBufferSource(); rs.buffer = nb; rs.loop = true;
+    const rh = ctx.createBiquadFilter(); rh.type = 'highpass'; rh.frequency.value = 1500;
+    const rl = ctx.createBiquadFilter(); rl.type = 'lowpass'; rl.frequency.value = 7500;
+    const rg = ctx.createGain(); rg.gain.value = 0.045; rs.connect(rh); rh.connect(rl); rl.connect(rg); rg.connect(this.master);
+    const rb = ctx.createBiquadFilter(); rb.type = 'bandpass'; rb.frequency.value = 420; rb.Q.value = 0.6;
+    const rbg = ctx.createGain(); rbg.gain.value = 0.04; rs.connect(rb); rb.connect(rbg); rbg.connect(this.master);
+    rs.start();
     // a low drone you feel more than hear
     const df = ctx.createBiquadFilter(); df.type = 'lowpass'; df.frequency.value = 180; df.connect(this.master);
     for (const [fr, v] of [[55, 0.05], [55.6, 0.05], [82.9, 0.016]]) { const o = ctx.createOscillator(), og = ctx.createGain(); o.frequency.value = fr; og.gain.value = v; o.connect(og); og.connect(df); o.start(); }
@@ -1148,7 +1259,32 @@ const audio = {
     out.connect(this.master); if (wet) out.connect(this.delay); o.start(t); o.stop(t + dur + 0.05);
   },
   bell(f, when, dur, vol) { [[1, 1], [2.0, 0.45], [2.76, 0.3], [5.4, 0.12]].forEach(([m, a], i) => this.tone(f * m, when, dur / (1 + i * 0.6), vol * a)); },
-  step() { this.burst(0.09, 0.045 + Math.random() * 0.025, 'lowpass', 420 + Math.random() * 300, 140, 0.7); },
+  swell(dur, vol, type, f0, f1, Q = 1, when = 0, pan = 0, wet = false) {      // noise that comes in slowly and leaves slowly: breath, whispers
+    if (!this.ctx) return;
+    const ctx = this.ctx, t = ctx.currentTime + when, s = ctx.createBufferSource(); s.buffer = this.noise; s.loop = true;
+    const f = ctx.createBiquadFilter(); f.type = type; f.Q.value = Q; f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + dur * 0.45); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); let out = g;
+    if (pan && ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = pan; g.connect(p); out = p; }
+    out.connect(this.master); if (wet) out.connect(this.delay);
+    s.start(t, Math.random() * 1.5); s.stop(t + dur + 0.05);
+  },
+  step() { this.burst(0.09, 0.045 + Math.random() * 0.025, 'lowpass', 420 + Math.random() * 300, 140, 0.7); this.burst(0.07, 0.016, 'bandpass', 1000, 520, 2, 0, false, 0.035); },
+  stepBehind(when) { this.burst(0.11, 0.034, 'lowpass', 300, 110, 0.7, 0, false, when); },      // a second set of feet, a moment after yours
+  heart(v) { this.tone(52, 0, 0.16, v, 'sine', 36, false); this.tone(46, 0.17, 0.2, v * 0.7, 'sine', 32, false); },
+  breath() { this.swell(0.9, 0.11, 'bandpass', 700, 1100, 1.2); this.swell(1.3, 0.14, 'bandpass', 950, 480, 1.2, 1.0); },
+  whisper() { for (let i = 0; i < 6; i++) this.swell(0.12 + Math.random() * 0.2, 0.05, 'bandpass', 2200 + Math.random() * 1800, 1800 + Math.random() * 1500, 5, i * 0.17 + Math.random() * 0.08, Math.random() * 2 - 1, true); },
+  sting() { for (const fq of [233, 247, 349, 370]) this.tone(fq, 0, 1.1, 0.05, 'sawtooth', fq * 0.94, true); this.burst(0.5, 0.2, 'highpass', 900, 300, 0.7, 0, true); this.tone(40, 0, 1.4, 0.35, 'sine', 26, false); },
+  snuffOut() { this.burst(0.5, 0.25, 'lowpass', 1400, 90, 0.8); this.tone(70, 0, 1.2, 0.3, 'sine', 28, false); },
+  thunder(when, v) {
+    const p = Math.random() * 1.4 - 0.7;
+    if (v > 0.7) this.burst(0.35, 0.5 * v, 'highpass', 500, 200, 0.5, p, true, when);
+    this.burst(1.6, 0.6 * v, 'lowpass', 700, 90, 0.6, p, true, when);
+    this.burst(4.8, 0.45 * v, 'lowpass', 190, 45, 0.8, -p, true, when + 0.25);
+    this.tone(44, when + 0.1, 3.4, 0.25 * v, 'sine', 27, false);
+  },
+  creak() { const p = Math.random() * 2 - 1, f = 70 + Math.random() * 40; this.tone(f, 0, 0.9, 0.035, 'sawtooth', f * 1.45, true, p); this.tone(f * 2.02, 0.05, 0.8, 0.015, 'square', f * 2.8, true, p); },
+  wail() { const p = Math.random() * 2 - 1, f = 400 + Math.random() * 160; this.tone(f, 0, 2.6, 0.012, 'triangle', f * 0.62, true, p); this.tone(f * 1.5, 0.1, 2.2, 0.005, 'sine', f * 0.9, true, p); },
   wisp() { const s = [220, 261.63, 293.66, 311.13, 392]; this.bell(s[Math.random() * s.length | 0] * 2, 0, 2.4, 0.05); },
   kindle() { this.burst(1.5, 0.22, 'lowpass', 220, 1700, 0.8, 0, true); this.bell(110, 0.2, 4.5, 0.09); },
   discover() { this.bell(98, 0, 6, 0.11); this.bell(146.83, 1.4, 5, 0.055); },
@@ -1158,7 +1294,7 @@ const audio = {
   snap() { this.burst(0.05, 0.06, 'highpass', 1700, 0, 0.7, Math.random() * 2 - 1, true); },
   gust() { if (!this.ctx) return; const g = this.wind.gain, t = this.ctx.currentTime; g.cancelScheduledValues(t); g.setValueAtTime(0.2, t); g.linearRampToValueAtTime(0.55, t + 0.9); g.linearRampToValueAtTime(0.2, t + 3.8); },
   ambient() {
-    if (this.ctx.state === 'running' && !document.hidden) { const r = Math.random(); if (r < 0.25) this.owl(); else if (r < 0.62) this.snap(); }
+    if (this.ctx.state === 'running' && !document.hidden) { const r = Math.random(); if (r < 0.18) this.owl(); else if (r < 0.5) this.snap(); else if (r < 0.7) this.creak(); else if (r < 0.77) this.wail(); }
     setTimeout(() => this.ambient(), 9000 + Math.random() * 17000);
   },
 };
@@ -1188,7 +1324,9 @@ function updateHud() {
 }
 function renderJournal() {
   const stats = [[save.wisps.size, 'lights gathered'], [save.shrines.size + 1, 'beacons lit'], [Math.round(save.dist) + ' m', 'walked'], [baseReveal().toFixed(1) + ' m', 'lantern reach']];
-  if (save.seen > 0) stats.push([save.seen, save.seen === 1 ? 'time something stood at the edge of your light' : 'times something stood at the edge of your light']);
+  if (save.seen > 0) stats.push([save.seen, save.seen === 1 ? 'time you looked and it was gone' : 'times you looked and it was gone']);
+  if (save.glimpsed > 0) stats.push([save.glimpsed, save.glimpsed === 1 ? 'time the lightning showed them standing there' : 'times the lightning showed them standing there']);
+  if (save.taken > 0) stats.push([save.taken, save.taken === 1 ? 'time the light went out' : 'times the light went out']);
   const js = $('jStats'); js.textContent = '';
   for (const [v, l] of stats) { const d = document.createElement('div'), b = document.createElement('b'); b.textContent = v; d.appendChild(b); d.appendChild(document.createTextNode(l)); js.appendChild(d); }
   const jl = $('jList'); jl.textContent = '';
@@ -1216,7 +1354,7 @@ $('jReset').addEventListener('click', () => {
 const isTouch = matchMedia('(pointer: coarse)').matches;
 $('hint').textContent = isTouch
   ? 'Drag to walk · second finger to look around'
-  : 'WASD or arrows to walk · Shift to hurry · drag to look · scroll to zoom · J journal';
+  : 'WASD or arrows to walk · Shift to hurry · drag to look behind you · scroll to zoom · J journal';
 const hasProgress = save.wisps.size + save.shrines.size + save.found.size > 0;
 $('go').textContent = (isTouch ? 'Tap' : 'Click') + (hasProgress ? ' to go back out' : ' to begin');
 $('title').addEventListener('pointerdown', () => {
@@ -1249,8 +1387,42 @@ const mist = Array.from({ length: MIST }, (_, i) => {
   return { s, m, x: 0, z: 0, h: 0.5 + (i % 4) * 0.25, init: false, ph: i * 1.9 };
 });
 
+// rain: streaks wrapped into a box around the camera. They only show where the lantern (or lightning) catches them
+const rainU = { uCam: { value: new V3() }, uLamp: { value: new V3() }, uTime: { value: 0 }, uLampI: { value: 1 }, uFlash: { value: 0 } };
+{
+  const N = 5200, p = new Float32Array(N * 6), e = new Float32Array(N * 2), s = new Float32Array(N * 2);
+  for (let i = 0; i < N; i++) {
+    const x = Math.random() * 24, y = Math.random() * 13, z = Math.random() * 24, sd = Math.random();
+    p.set([x, y, z, x, y, z], i * 6); e[i * 2] = 0; e[i * 2 + 1] = 1; s[i * 2] = s[i * 2 + 1] = sd;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(p, 3)); g.setAttribute('aEnd', new THREE.BufferAttribute(e, 1)); g.setAttribute('aSeed', new THREE.BufferAttribute(s, 1));
+  const rain = new THREE.LineSegments(g, new THREE.ShaderMaterial({
+    uniforms: rainU, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `
+      uniform vec3 uCam; uniform vec3 uLamp; uniform float uTime; uniform float uLampI; uniform float uFlash;
+      attribute float aEnd; attribute float aSeed; varying vec3 vC;
+      const vec3 BOX = vec3(24.0, 13.0, 24.0);
+      void main(){
+        vec3 v = vec3(2.2 + aSeed, -(15.0 + aSeed * 6.0), 1.1);
+        vec3 p = position + v * uTime;
+        p = uCam + mod(p - uCam + BOX * 0.5, BOX) - BOX * 0.5;
+        p += normalize(v) * (0.22 + aSeed * 0.2) * aEnd;
+        float dl = distance(p, uLamp), dc = distance(p, uCam);
+        float lamp = uLampI * 0.7 / (1.0 + dl * dl * 0.7);
+        float fade = smoothstep(0.6, 2.2, dc) * (1.0 - smoothstep(8.0, 12.0, dc));
+        vC = (vec3(1.0, 0.56, 0.24) * lamp + vec3(0.5, 0.6, 0.8) * (0.012 + uFlash * 0.7)) * fade * (0.4 + 0.6 * aSeed);
+        gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
+      }`,
+    fragmentShader: 'varying vec3 vC; void main(){ gl_FragColor = vec4(vC, 1.0); }',
+  }));
+  rain.frustumCulled = false; scene.add(rain);
+}
+
 function updateParticles(dt) {
   lantern.getWorldPosition(lanternWorld);
+  rainU.uTime.value = time; rainU.uCam.value.copy(camera.position); rainU.uLamp.value.copy(lanternWorld);
+  rainU.uLampI.value = lanternLight.intensity / 30; rainU.uFlash.value = flashK;
   embAcc += dt * 3.5;
   while (embAcc > 1) {
     embAcc--; const e = embD[embNext]; embNext = (embNext + 1) % EMB;
@@ -1291,8 +1463,8 @@ function updateParticles(dt) {
     f.x += (0.32 + Math.sin(time * 0.2 + f.ph) * 0.15) * dt; f.z += (0.14 + Math.cos(time * 0.17 + f.ph) * 0.12) * dt;
     f.s.position.set(f.x, height(f.x, f.z) + f.h, f.z);
     const d = Math.sqrt(d2), near = smooth(revealR * 1.25, revealR * 0.2, d) * lf, edge = smooth(30, 21, d);
-    f.m.color.copy(cCold).lerp(cWarm, Math.min(1, near));
-    f.m.opacity = (0.035 + 0.03 * near) * edge * (0.75 + 0.25 * Math.sin(time * 0.4 + f.ph));
+    f.m.color.copy(cCold).lerp(cWarm, Math.min(1, near) * 0.55);
+    f.m.opacity = (0.014 + 0.01 * near + 0.05 * flashK) * edge * (0.75 + 0.25 * Math.sin(time * 0.4 + f.ph));
   }
 }
 
@@ -1326,34 +1498,112 @@ function updateWatchers(dt) {
     w.a.position.set(w.x + px, w.y, w.z + pz); w.b.position.set(w.x - px, w.y, w.z - pz);
   }
 }
-// a tall figure that waits just past the light, and is gone when the light arrives
-const follower = { g: new THREE.Group(), on: false, sinking: false, x: 0, z: 0, t: 0, wait: 55 + Math.random() * 40 };
-{
-  const g = follower.g;
-  g.add(mk(G.thin, mats.figure)); g.add(mk(G.sphere, mats.figure, 0, 2.3, 0.03, 0.12, 0.16, 0.13));
-  for (const sd of [-1, 1]) { g.add(mk(G.cyl, mats.figure, sd * 0.22, 0.72, 0.03, 0.03, 1.22, 0.03, 0, 0, sd * 0.03)); g.add(glow(G.sphere, mats.eye, sd * 0.045, 2.33, 0.145, 0.011, 0.011, 0.011)); }
+// The tall one. It stands where the light gives out, or behind you where you are not looking.
+// Look straight at it and the flame stutters and it is gone. Ignore it, and each time the lantern gutters it is closer.
+function figureModel() {
+  const g = new THREE.Group();
+  g.add(mk(G.thin, mats.figure, 0, 0, 0, 1, 1, 0.62));
+  g.add(mk(G.sphere, mats.figure, 0, 2.36, 0.04, 0.115, 0.17, 0.13));
+  g.add(mk(G.sphere, mats.face, 0, 2.35, 0.115, 0.08, 0.125, 0.05));          // a pale face with nothing on it
+  for (const sd of [-1, 1]) {
+    g.add(mk(G.cyl, mats.figure, sd * 0.27, 0.6, 0.05, 0.028, 1.42, 0.028, 0, 0, sd * 0.02));   // arms that hang to the knee
+    g.add(mk(G.boxC, mats.black, sd * 0.034, 2.375, 0.16, 0.032, 0.024, 0.012));
+    g.add(glow(G.sphere, mats.eye, sd * 0.034, 2.375, 0.166, 0.009, 0.009, 0.005));
+  }
   g.visible = false; scene.add(g);
+  return g;
 }
+const follower = { g: figureModel(), on: false, x: 0, y: 0, z: 0, wait: 45 + Math.random() * 35, behind: false, seenT: 0, moved: false, vanish: false, age: 0 };
+let snuffT = 0, snuffDur = 0.5, takenT = -1, takenDark = 0, stalk = 0, hbT = 0;
+function snuff(d) { snuffT = snuffDur = d; }                    // a short hard stutter of the flame
+const aside = () => (Math.random() < 0.5 ? -1 : 1) * (0.2 + Math.random() * 0.38);   // off to one side, so the walker's own body does not hide it
+function setFollower(x, z) { const f = follower; f.x = x; f.z = z; f.y = height(x, z); f.g.position.set(x, f.y, z); }
+function endFollower(wait) { const f = follower; f.on = false; f.g.visible = false; f.wait = wait; f.vanish = false; stalk = 0; }
+function spawnFollower(behind = Math.random() < 0.45) {
+  // a bearing of camYaw points from the walker back toward the camera
+  const f = follower, a = behind ? camYaw + (Math.random() - 0.5) * 0.9 : camYaw + Math.PI + aside();
+  const d = behind ? camDistNow + 5 + Math.random() * 4 : revealR + 1.5 + Math.random() * 2.5;
+  const x = ppos.x + Math.sin(a) * d, z = ppos.z + Math.cos(a) * d;
+  for (const s of litNear) if (Math.hypot(x - s.x, z - s.z) < SHRINE_R) { f.wait = 6; return; }      // it will not stand in a beacon's light
+  setFollower(x, z);
+  f.on = true; f.behind = behind; f.seenT = 0; f.moved = gutterShape > 0.1; f.vanish = false; f.age = 0; f.g.visible = true;
+  if (behind) stalk = 16 + Math.random() * 10;
+  gutterNext = Math.min(gutterNext, 8 + Math.random() * 8);
+}
+function take() { takenT = 0; follower.g.visible = false; stalk = 0; audio.snuffOut(); }
 function updateFollower(dt) {
   const f = follower;
-  if (!f.on) {
-    if (!started) return;
-    f.wait -= dt; if (f.wait > 0) return;
-    const sp = Math.hypot(vel.x, vel.z), base = sp > 0.5 ? Math.atan2(vel.x, vel.z) : player.rotation.y;
-    const a = base + (Math.random() - 0.5) * 1.6, d = revealR + 2.5 + Math.random() * 2, x = ppos.x + Math.sin(a) * d, z = ppos.z + Math.cos(a) * d;
-    if (isLit(x, z, 2) || pathiness(x, z) > 0.5) { f.wait = 4; return; }
-    f.x = x; f.z = z; f.t = 1; f.on = true; f.sinking = false; f.g.visible = true; f.g.position.set(x, height(x, z), z); f.g.scale.set(1, 1, 1);
-    return;
-  }
+  if (!f.on) { if (started && takenT < 0) { f.wait -= dt; if (f.wait <= 0) spawnFollower(); } return; }
+  if (takenT >= 0) return;
+  f.age += dt;
   const dx = ppos.x - f.x, dz = ppos.z - f.z, d = Math.hypot(dx, dz);
   f.g.rotation.y = Math.atan2(dx, dz);
-  if (!f.sinking && d < revealR * 0.62) { f.sinking = true; save.seen++; audio.dread(); }
-  if (!f.sinking && d > revealR + 18) { f.on = false; f.g.visible = false; f.wait = 20 + Math.random() * 30; return; }
-  if (f.sinking) {
-    f.t -= dt * 2.4; const e = Math.max(0, f.t);
-    f.g.scale.set(0.6 + 0.4 * e, e * e + 0.0001, 0.6 + 0.4 * e);
-    if (f.t <= 0) { f.on = false; f.g.visible = false; f.wait = 50 + Math.random() * 80; }
+  if (f.vanish) { if (snuffT <= snuffDur * 0.5) endFollower(40 + Math.random() * 70); return; }      // gone in the dark half of the stutter
+  camera.getWorldDirection(tmpV);
+  const vx = f.x - camera.position.x, vy = f.y + 1.7 - camera.position.y, vz = f.z - camera.position.z;
+  const inView = (vx * tmpV.x + vy * tmpV.y + vz * tmpV.z) / (Math.hypot(vx, vy, vz) || 1) > 0.74;
+  if (inView && d < revealR * 0.9 && gutterShape < 0.35) f.seenT += dt; else f.seenT = Math.max(0, f.seenT - dt * 0.5);
+  if (f.seenT > 1 || (inView && d < 2.8)) { f.vanish = true; snuff(0.55); save.seen++; audio.dread(); return; }
+  if (d < (f.behind ? camDistNow + 1.6 : 2.8)) { take(); return; }
+  if (d > 46 || f.age > 160) { endFollower(30 + Math.random() * 40); return; }
+  if (gutterShape > 0.85 && !f.moved) {
+    f.moved = true;
+    const nd = Math.max(f.behind ? camDistNow + 1.2 : 2.3, Math.min(d, revealR + 3) - 2.5 - Math.random() * 2.5);
+    const a = f.behind ? camYaw + (Math.random() - 0.5) * 0.7 : camYaw + Math.PI + aside();
+    setFollower(ppos.x + Math.sin(a) * nd, ppos.z + Math.cos(a) * nd);
+  } else if (gutterShape < 0.1) f.moved = false;
+  hbT -= dt;       // your heart knows it is there before you do
+  if (hbT <= 0 && d < 20) { const k = clamp(1 - (d - 2.5) / 14, 0, 1); audio.heart(0.05 + 0.2 * k); hbT = lerp(1.1, 0.5, k); }
+}
+// it reached you: the light goes out, something breathes, and when the flame catches it is standing right there
+function updateTaken(dt) {
+  if (takenT < 0) return;
+  const t0 = takenT, t1 = takenT += dt, hit = x => t0 < x && t1 >= x, f = follower;
+  if (hit(0.6)) audio.breath();
+  if (hit(1.7)) audio.whisper();
+  hbT -= dt; if (hbT <= 0) { audio.heart(0.3); hbT = 0.42; }
+  if (hit(2.7)) {      // beside the walker, on the lantern side, where the camera cannot miss it
+    const sy = Math.sin(camYaw), cy = Math.cos(camYaw);
+    setFollower(ppos.x - sy * 1.5 + cy * 0.9, ppos.z - cy * 1.5 - sy * 0.9);
+    f.g.rotation.y = Math.atan2(ppos.x - f.x, ppos.z - f.z); f.g.visible = true; audio.sting(); flare = 0.5;
   }
+  if (hit(3.3)) f.g.visible = false;
+  takenDark = t1 < 2.7 ? Math.min(1, t1 / 0.15) : t1 < 3.3 ? 0.14 + 0.12 * Math.sin(time * 43) : t1 < 3.5 ? 1 : 0;
+  if (t1 >= 3.5) { takenT = -1; takenDark = 0; flare = 0.6; save.taken++; persist(); endFollower(100 + Math.random() * 90); gutterNext = 40 + Math.random() * 40; }
+}
+
+// lightning: for a moment the whole moor is there, and sometimes so are they
+const standers = [0, 1, 2].map(() => figureModel());
+let flashT = -1, flashNext = 26 + Math.random() * 30, flashK = 0, strikes = 0, pulses = [], flashHold = 0;   // flashHold: debug only
+function strike(showThem) {
+  flashNext = 24 + Math.random() * 55; flashT = 0; strikes++;
+  const far = Math.random();
+  pulses = [[0, 0.55, 0.05], [0.09 + Math.random() * 0.08, 1 - far * 0.45, 0.13]];
+  if (Math.random() < 0.6) pulses.push([0.42 + Math.random() * 0.25, 0.5 - far * 0.2, 0.2]);
+  const a = Math.random() * 6.28; flashLight.position.set(Math.cos(a), 0.9, Math.sin(a));
+  audio.thunder(0.35 + far * 2.8, 1 - far * 0.6);
+  if (showThem ?? (strikes > 2 && Math.random() < 0.35)) {
+    let n = 1 + (Math.random() * 3 | 0);
+    for (const g of standers) {
+      if (n-- <= 0) break;
+      const a2 = camYaw + Math.PI + (Math.random() - 0.5) * 1.0, d = Math.max(revealR + 3, 10) + Math.random() * 8;
+      const x = ppos.x + Math.sin(a2) * d, z = ppos.z + Math.cos(a2) * d;
+      g.position.set(x, height(x, z), z); g.rotation.y = Math.atan2(ppos.x - x, ppos.z - z); g.visible = true;
+    }
+    save.glimpsed++;
+  }
+}
+function updateStorm(dt) {
+  if (started && takenT < 0) { flashNext -= dt; if (flashNext <= 0) strike(); }
+  let k = 0;
+  if (flashT >= 0) {
+    flashT += dt;
+    for (const [t, a, d] of pulses) { const u = flashT - t; if (u >= 0) k = Math.max(k, a * Math.exp(-u / d)); }
+    if (flashT > 1.5) { flashT = -1; if (!flashHold) for (const g of standers) g.visible = false; }
+  }
+  flashK = k = Math.max(k, flashHold);
+  flashLight.intensity = k * 0.6; hemi.intensity = HEMI + k * 1.2;
+  scene.fog.color.copy(fogDark).lerp(fogFlash, k); scene.background.copy(scene.fog.color);
 }
 // crows that were roosting in a dead tree until your light woke it
 const crowMat = new THREE.MeshStandardMaterial({ color: 0x08080a, roughness: 0.8, side: THREE.DoubleSide });
@@ -1385,12 +1635,12 @@ function updateCrows(dt) {
 }
 
 /* ------------------------------------------------------------- game logic */
-let time = 0, saveTimer = 0, litTimer = 0;
+let time = 0, saveTimer = 0, litTimer = 0, walkK = 0, wasMoving = false, darkNow = 0;
 const flying = [];
 
 function updatePlayer(dt) {
   let ix = 0, iz = 0;
-  if (started && !journalOpen) {
+  if (started && !journalOpen && takenT < 0) {
     if (keys.KeyW || keys.ArrowUp) iz += 1;
     if (keys.KeyS || keys.ArrowDown) iz -= 1;
     if (keys.KeyD || keys.ArrowRight) ix += 1;
@@ -1400,8 +1650,9 @@ function updatePlayer(dt) {
     if (keys.KeyE) camYaw -= dt * 1.6;
   }
   let len = Math.hypot(ix, iz); if (len > 1) { ix /= len; iz /= len; len = 1; }
+  if (!drag && Math.abs(ix) > 0.05) camYaw -= ix * dt * 0.75;      // the camera swings round to stay behind you
   const fx = -Math.sin(camYaw), fz = -Math.cos(camYaw), rx = Math.cos(camYaw), rz = -Math.sin(camYaw);
-  const sp = (keys.ShiftLeft || keys.ShiftRight) ? 5.2 : 3.0;
+  const sp = (keys.ShiftLeft || keys.ShiftRight) ? 4.2 : 2.2;
   const a = 1 - Math.exp(-dt * 8);
   vel.x = lerp(vel.x, (fx * iz + rx * ix) * sp, a); vel.z = lerp(vel.z, (fz * iz + rz * ix) * sp, a);
   ppos.x += vel.x * dt; ppos.z += vel.z * dt;
@@ -1409,20 +1660,23 @@ function updatePlayer(dt) {
   for (const ch of chunks.values()) {
     if (Math.abs(ch.cx - pcx) > 1 || Math.abs(ch.cz - pcz) > 1) continue;
     for (const o of ch.objs) {
-      if (o.t < 0.5) continue;
       for (const c of o.cols) {
         const dx = ppos.x - c[0], dz = ppos.z - c[1], rr = c[2] + 0.28, d2 = dx * dx + dz * dz;
         if (d2 < rr * rr && d2 > 1e-6) { const d = Math.sqrt(d2); ppos.x = c[0] + dx / d * rr; ppos.z = c[1] + dz / d * rr; }
       }
     }
   }
-  const spd = Math.hypot(vel.x, vel.z), k = clamp(spd / 3.0, 0, 1);
+  const spd = Math.hypot(vel.x, vel.z), k = walkK = clamp(spd / 2.2, 0, 1);
   save.dist += spd * dt;
   ppos.y = height(ppos.x, ppos.z);
   player.position.copy(ppos);
   if (spd > 0.25) player.rotation.y = lerpAngle(player.rotation.y, Math.atan2(vel.x, vel.z), 1 - Math.exp(-dt * 9));
   walkPhase += spd * dt * 2.3;
-  const sn = Math.floor(walkPhase / Math.PI); if (sn !== stepN) { stepN = sn; if (spd > 0.6) audio.step(); }
+  const sn = Math.floor(walkPhase / Math.PI);
+  if (sn !== stepN) { stepN = sn; if (spd > 0.6) { audio.step(); if (stalk > 0) audio.stepBehind(0.3 + Math.random() * 0.06); } }
+  const moving = spd > 0.6;
+  if (wasMoving && !moving && stalk > 0) audio.stepBehind(0.42);      // you stop. It takes one more step
+  wasMoving = moving; stalk = Math.max(0, stalk - dt);
   body.position.y = Math.abs(Math.sin(walkPhase)) * 0.04 * k;
   body.rotation.z = Math.sin(walkPhase) * 0.035 * k;
   body.rotation.x = 0.07 * k;
@@ -1432,69 +1686,68 @@ function updatePlayer(dt) {
 
 function updateCamera(dt) {
   if (!started) camYaw += dt * 0.03;
-  camTarget.lerp(tmpV.set(ppos.x, ppos.y + 1.2, ppos.z), 1 - Math.exp(-dt * 5));
-  const cp = Math.cos(camPitch);
-  camera.position.set(camTarget.x + Math.sin(camYaw) * cp * camDist, camTarget.y + Math.sin(camPitch) * camDist, camTarget.z + Math.cos(camYaw) * cp * camDist);
-  const gy = height(camera.position.x, camera.position.z) + 0.6; if (camera.position.y < gy) camera.position.y = gy;
+  const sh = 0.5 * smooth(9, 4.5, camDist);      // look past the right shoulder, where the lantern is held
+  camTarget.lerp(tmpV.set(ppos.x + Math.cos(camYaw) * sh, ppos.y + 1.7, ppos.z - Math.sin(camYaw) * sh), 1 - Math.exp(-dt * 7));
+  // pull in rather than let a trunk come between the camera and the walker
+  const cp = Math.cos(camPitch), ux = Math.sin(camYaw), uz = Math.cos(camYaw);
+  let want = camDist;
+  for (const ch of chunks.values()) {
+    if (Math.abs(ch.cx - pcx) > 1 || Math.abs(ch.cz - pcz) > 1) continue;
+    for (const o of ch.objs) {
+      if (!o.tall) continue;
+      for (const c of o.cols) {
+        const ox = c[0] - camTarget.x, oz = c[1] - camTarget.z, along = ox * ux + oz * uz, rr = c[2] + 0.12;
+        if (along < 0.2 || along > camDist * cp + rr) continue;
+        const perp = Math.abs(ox * uz - oz * ux); if (perp >= rr) continue;
+        const hit = (along - Math.sqrt(rr * rr - perp * perp)) / Math.max(cp, 0.2);
+        if (hit < want && Math.sin(camPitch) * hit < o.tall) want = Math.max(2.1, hit);
+      }
+    }
+  }
+  camDistNow = lerp(camDistNow, want, 1 - Math.exp(-dt * (want < camDistNow ? 16 : 3)));
+  camera.position.set(camTarget.x + ux * cp * camDistNow, camTarget.y + Math.sin(camPitch) * camDistNow, camTarget.z + uz * cp * camDistNow);
+  const gy = height(camera.position.x, camera.position.z) + 0.45; if (camera.position.y < gy) camera.position.y = gy;
+  camera.position.y += Math.abs(Math.sin(walkPhase)) * 0.03 * walkK;
   camera.lookAt(camTarget);
+  camera.rotateZ(Math.sin(walkPhase) * 0.005 * walkK + Math.sin(time * 0.6) * 0.002);     // carried, not on rails
   sky.position.copy(camera.position);
 }
 
 function updateLantern(dt) {
-  // every so often the flame gutters: the light shrinks, and whatever was at its edge sinks back
-  if (started) { gutterNext -= dt; if (gutterNext <= 0) { gutterT = 2.8; gutterNext = 45 + Math.random() * 60; audio.gust(); } }
+  // every so often the flame gutters and the dark closes in. It gutters more often when you are not alone
+  if (started && takenT < 0) { gutterNext -= dt; if (gutterNext <= 0) { gutterT = 2.8; gutterNext = follower.on ? 9 + Math.random() * 11 : 40 + Math.random() * 55; audio.gust(); } }
   gutterT = Math.max(0, gutterT - dt);
   gutterShape = gutterT > 0 ? Math.sin(Math.PI * (1 - gutterT / 2.8)) : 0;
+  snuffT = Math.max(0, snuffT - dt);
+  const dark = darkNow = Math.max(snuffT > 0 ? Math.sin(Math.PI * (1 - snuffT / snuffDur)) : 0, takenDark);
   revealR = lerp(revealR, baseReveal() * (1 - 0.42 * gutterShape), 1 - Math.exp(-dt * (gutterShape > 0 ? 5 : 1.5)));
   flare = Math.max(0, flare - dt * 1.4);
   const fl = (0.9 + 0.06 * Math.sin(time * 11.3) + 0.05 * Math.sin(time * 23.7 + 1.3) + 0.04 * Math.sin(time * 5.1) + 0.03 * Math.sin(time * 37.1))
-    * (1 - 0.72 * gutterShape * (0.75 + 0.25 * Math.sin(time * 31)));
+    * (1 - 0.72 * gutterShape * (0.75 + 0.25 * Math.sin(time * 31))) * (1 - dark);
   lanternLight.intensity = (18 + revealR * 1.6) * fl * (1 + flare * 0.9);
   lanternLight.distance = revealR * 1.9;
-  fillLight.intensity = (8 + revealR * 1.0) * (0.5 + fl * 0.5) * (1 + flare * 0.6);
+  fillLight.intensity = (2 + revealR * 0.3) * fl * (1 + flare * 0.6);
   fillLight.distance = revealR * 1.75;
   lanternHalo.scale.setScalar(0.65 * fl + flare * 1.4);
+  lanternHaze.scale.setScalar(4 * (0.3 + 0.7 * fl) + flare * 2);
+  lanternFlame.emissiveIntensity = 4.2 * Math.max(0.02, fl);
   for (const L of pool) L.intensity = L.userData.on ? 26 * (0.86 + 0.09 * Math.sin(time * 9 + L.userData.ph) + 0.05 * Math.sin(time * 21 + L.userData.ph * 2)) : 0;
 }
 
-function updateReveal(dt) {
-  // trees standing between the camera and the walker sink down out of the way
-  const cdx = camera.position.x - ppos.x, cdz = camera.position.z - ppos.z, clen = Math.hypot(cdx, cdz) || 1;
-  const ux = cdx / clen, uz = cdz / clen, slope = Math.tan(camPitch), dkA = 1 - Math.exp(-dt * 6);
+// the world is always there, standing in the dark; only a few things in it answer the light
+function updateProps(dt) {
+  const sr = Math.min(revealR, 10) * 0.85 + 5.7, sr2 = sr * sr;      // shadows only matter where the lantern is strong
   for (const ch of chunks.values()) {
-    for (const o of ch.objs) {
-      if (o.always) continue;
-      const tgt = isLit(o.x, o.z, o.j + o.big) ? 1 : 0;
-      let dkT = 0;
-      if (o.tall && o.t > 0) {
-        const vx = o.x - ppos.x, vz = o.z - ppos.z, proj = vx * ux + vz * uz;
-        if (proj > 0.6 && proj < clen && Math.abs(vx * uz - vz * ux) < 2.0 && o.tall > proj * slope + 0.2) dkT = 1;
-      }
-      const dkMoving = Math.abs(o.dk - dkT) > 0.002;
-      if (o.t !== tgt || dkMoving) {
-        if (o.t !== tgt) o.t = tgt ? Math.min(1, o.t + dt * o.spd) : Math.max(0, o.t - dt * o.spd * 0.9);
-        o.dk = dkMoving ? lerp(o.dk, dkT, dkA) : dkT;
-        const e = o.t * o.t * (3 - 2 * o.t);
-        const w = o.s * (0.3 + 0.7 * e) * (1 - o.dk * 0.7), h = o.s * e * (1 - o.dk * 0.98);
-        o.g.scale.set(w, Math.max(h, 0.0001), w);
-        o.g.visible = o.t > 0.002 && o.dk < 0.97;
-        if (o.crows && !o.crowed && tgt && o.t > 0.6 && started) { o.crowed = true; spawnCrows(o.x, o.y + o.tall * 0.75, o.z); }
-      }
-      if (o.face && o.t > 0) o.g.rotation.y = lerpAngle(o.g.rotation.y, Math.atan2(ppos.x - o.x, ppos.z - o.z), 1 - Math.exp(-dt * 0.9));
-      if (o.kind === 'curio' && !o.seen && o.t > 0.6 && started) discover(o);
+    const vis = Math.hypot((ch.cx + 0.5) * CH - ppos.x, (ch.cz + 0.5) * CH - ppos.z) < 47;      // beyond this the mist has it anyway
+    ch.group.visible = vis;
+    if (!vis) continue;
+    for (const m of ch.casters) { const dx = m.userData.cx - ppos.x, dz = m.userData.cz - ppos.z; m.castShadow = dx * dx + dz * dz < sr2; }
+    for (const o of ch.active) {
+      if (o.face) o.g.rotation.y = lerpAngle(o.g.rotation.y, Math.atan2(ppos.x - o.x, ppos.z - o.z), 1 - Math.exp(-dt * 0.9));
+      if (!started) continue;
+      if (o.crows && !o.crowed && isLit(o.x, o.z, -2)) { o.crowed = true; spawnCrows(o.x, o.y + o.tall * 0.75, o.z); }
+      if (o.kind === 'curio' && !o.seen && isLit(o.x, o.z, 0.5)) discover(o);
     }
-    const im = ch.tufts, data = ch.tuftData; let changed = false;
-    for (let i = 0; i < data.length; i++) {
-      const d = data[i], tgt = isLit(d.x, d.z, d.j) ? 1 : 0;
-      if (d.t === tgt) continue;
-      d.t = tgt ? Math.min(1, d.t + dt * 1.6) : Math.max(0, d.t - dt * 1.4);
-      const e = d.t * d.t * (3 - 2 * d.t);
-      // a fully sunk tuft must collapse to nothing: a zero height with a non-zero width leaves flat slivers with invalid normals
-      if (d.t <= 0) tmpM.makeScale(0, 0, 0);
-      else tmpM.makeRotationY(d.rot).scale(tmpS.set(d.s * (0.4 + 0.6 * e), d.s * Math.max(e, 0.001), d.s * (0.4 + 0.6 * e))).setPosition(d.x, d.y, d.z);
-      im.setMatrixAt(i, tmpM); changed = true;
-    }
-    if (changed) im.instanceMatrix.needsUpdate = true;
   }
 }
 
@@ -1550,7 +1803,7 @@ function updateShrines(dt) {
     const dx = ppos.x - s.x, dz = ppos.z - s.z;
     if (dx * dx + dz * dz < 2.4 * 2.4) {
       setLit(s); save.shrines.add(s.id); refreshLit(); updateHud(); persist(); audio.kindle(); flare = 0.8;
-      if (save.shrines.size === 1) toast('Beacon lit', 'It will hold this place in the light after you have gone.');
+      if (save.shrines.size === 1) toast('Beacon lit', 'It will go on burning here after you have gone. Nothing tall will stand in its light.');
       else toast('Beacon lit', null, true);
     }
   }
@@ -1565,7 +1818,7 @@ function perf(rawDt) {
     if (perfN / perfT < 24) {   // well under 30, so a host that caps a background tab at 30 fps does not trip it
       if (shadowEvery < 3) { shadowEvery = 3; perfT = 0; perfN = 0; return; }
       if (lanternLight.castShadow) { lanternLight.castShadow = false; perfT = 0; perfN = 0; return; }
-      renderer.setPixelRatio(1); composer.setPixelRatio(1);
+      maxPR = 1; renderer.setPixelRatio(1); composer.setPixelRatio(1);
     }
     perfDone = true;
   }
@@ -1573,15 +1826,18 @@ function perf(rawDt) {
 
 /* -------------------------------------------------------------- main loop */
 const clock = new THREE.Clock();
-updateChunks();
-function frame() {
-  const raw = clock.getDelta(), dt = Math.min(raw, 0.05);
+updateChunks(true);
+const frame = () => tick(clock.getDelta());
+function tick(raw) {
+  const dt = Math.min(raw, 0.05);
   time += dt; windU.value = time;
   updatePlayer(dt);
   updateChunks();
   litTimer += dt; if (litTimer > 0.4) { litTimer = 0; refreshLit(); }
+  updateTaken(dt);
   updateLantern(dt);
-  updateReveal(dt);
+  updateStorm(dt);
+  updateProps(dt);
   updateParticles(dt);
   updateWisps(dt);
   updateShrines(dt);
@@ -1592,14 +1848,16 @@ function frame() {
   perf(raw);
   saveTimer += dt; if (saveTimer > 5 && started) { saveTimer = 0; persist(); }
   if (frameN++ % shadowEvery === 0) lanternLight.shadow.needsUpdate = true;
-  grade.uniforms.time.value = time; grade.uniforms.dim.value = gutterShape;
+  grade.uniforms.time.value = time; grade.uniforms.dim.value = Math.max(gutterShape, darkNow);
   composer.render();
 }
 renderer.setAnimationLoop(frame);
 addEventListener('pagehide', () => { if (started) persist(); });
 
 // small hook for debugging from the console
-window.__lantern = { save, chunks, ppos, follower, watchers, bloom, scene, player, crows, mist, composer, renderer, lanternLight, get revealR() { return revealR; }, gutter() { gutterNext = 0; }, summon() { follower.wait = 0; }, cam(y, p, d) { camYaw = y; camPitch = p; camDist = d; }, go(x, z) { ppos.x = x; ppos.z = z; } };
+window.__lantern = { save, chunks, ppos, follower, watchers, bloom, scene, player, crows, mist, composer, renderer, lanternLight, get revealR() { return revealR; }, gutter() { gutterNext = 0; }, summon(behind) { endFollower(0); spawnFollower(behind); }, strike(them) { strike(them); }, hold(k) { flashHold = k; }, take() { take(); }, step(n, dt = 1 / 30) { for (let i = 0; i < n; i++) tick(dt); }, standers, camera,
+  get state() { return { revealR, gutterShape, takenT, flashK, stalk, darkNow, camDistNow, camYaw, follower: { on: follower.on, behind: follower.behind, d: Math.hypot(ppos.x - follower.x, ppos.z - follower.z), seenT: follower.seenT, vis: follower.g.visible } }; },
+  cam(y, p, d) { camYaw = y; camPitch = p; camDist = d; }, go(x, z) { ppos.x = x; ppos.z = z; } };
 </script>
 </body>
 </html>
